@@ -11,6 +11,8 @@ find_package(glfw3 CONFIG REQUIRED)
 
 find_package(Vulkan REQUIRED)
 
+find_package(glm CONFIG REQUIRED)
+
 add_executable(vulkan main.cpp)
 
-target_link_libraries(vulkan PRIVATE glfw Vulkan::Vulkan)
+target_link_libraries(vulkan PRIVATE glfw Vulkan::Vulkan glm::glm-header-only)
