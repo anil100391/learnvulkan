@@ -38,6 +38,10 @@ static std::vector<char> ReadFile(const std::string& filename)
 
 // -----------------------------------------------------------------------------
 // -----------------------------------------------------------------------------
+static void FrameBufferResizeCallback( GLFWwindow *window, int width, int height );
+
+// -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 static void KeyCallback( GLFWwindow *window, int key, int scancode, int action, int mods )
 {
     if ( key == GLFW_KEY_ESCAPE && action == GLFW_PRESS )
@@ -99,6 +103,8 @@ public:
 
     void Run();
 
+    bool p_frameBufferResized = false;
+
 private:
 
     struct QueueFamilyIndices
@@ -133,7 +139,9 @@ private:
     VkPresentModeKHR ChooseSwapPresentMode(const std::vector<VkPresentModeKHR> &avaiablePresentModes);
     VkExtent2D ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities);
     void CreateLogicalDevice();
+    void RecreateSwapChain();
     void CreateSwapChain();
+    void CleanupSwapChain();
     void CreateImageViews();
     void CreateRenderPass();
     void CreateGraphicsPipelines();
@@ -205,7 +213,8 @@ void HelloTriangleApp::InitWindow()
     int height = 512;
     const char *title = "Learn Vulkan";
     p_window = glfwCreateWindow(width, height, title, nullptr, nullptr);
-
+    glfwSetWindowUserPointer(p_window, this);
+    glfwSetFramebufferSizeCallback(p_window, FrameBufferResizeCallback);
     glfwSetKeyCallback(p_window, KeyCallback);
     if ( !p_window )
     {
@@ -242,10 +251,23 @@ void HelloTriangleApp::MainLoop()
 void HelloTriangleApp::DrawFrame()
 {
     vkWaitForFences(p_device, 1, &p_inFlightFences[p_currentFrame], VK_TRUE, UINT64_MAX);
-    vkResetFences(p_device, 1, &p_inFlightFences[p_currentFrame]);
 
     uint32_t imageIndex;
-    vkAcquireNextImageKHR(p_device, p_swapChain, UINT64_MAX, p_imageAvailableSemaphores[p_currentFrame], VK_NULL_HANDLE, &imageIndex);
+    VkResult result = vkAcquireNextImageKHR(p_device, p_swapChain, UINT64_MAX, p_imageAvailableSemaphores[p_currentFrame], VK_NULL_HANDLE, &imageIndex);
+
+    if ( result == VK_ERROR_OUT_OF_DATE_KHR )
+    {
+        RecreateSwapChain();
+        return;
+    }
+
+    if ( result != VK_SUCCESS || result == VK_SUBOPTIMAL_KHR )
+    {
+        throw std::runtime_error("failed to acquire swap chain image!");
+    }
+
+    // Only reset the fence if we are submitting work
+    vkResetFences(p_device, 1, &p_inFlightFences[p_currentFrame]);
 
     vkResetCommandBuffer(p_commandBuffers[p_currentFrame], 0);
     RecordCommandBuffer(p_commandBuffers[p_currentFrame], imageIndex);
@@ -282,7 +304,16 @@ void HelloTriangleApp::DrawFrame()
 
     presentInfo.pResults = nullptr;
 
-    vkQueuePresentKHR(p_presentQueue, &presentInfo);
+    result = vkQueuePresentKHR(p_presentQueue, &presentInfo);
+    if ( result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || p_frameBufferResized )
+    {
+        p_frameBufferResized = false;
+        RecreateSwapChain();
+    }
+    else if (result !=VK_SUCCESS)
+    {
+        throw std::runtime_error("failed to present swap chain image!");
+    }
 
     p_currentFrame = (p_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
@@ -292,6 +323,12 @@ void HelloTriangleApp::DrawFrame()
 // -----------------------------------------------------------------------------
 void HelloTriangleApp::Cleanup()
 {
+    CleanupSwapChain();
+
+    vkDestroyPipeline(p_device, p_graphicsPipeline, nullptr);
+    vkDestroyPipelineLayout(p_device, p_pipelineLayout, nullptr);
+    vkDestroyRenderPass(p_device, p_renderPass, nullptr);
+
     for ( size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i )
     {
         vkDestroySemaphore(p_device, p_imageAvailableSemaphores[i], nullptr);
@@ -301,21 +338,6 @@ void HelloTriangleApp::Cleanup()
 
     vkDestroyCommandPool(p_device, p_commandPool, nullptr);
 
-    for ( auto framebuffer : p_swapChainFrameBuffers )
-    {
-        vkDestroyFramebuffer(p_device, framebuffer, nullptr);
-    }
-
-    vkDestroyPipeline(p_device, p_graphicsPipeline, nullptr);
-    vkDestroyPipelineLayout(p_device, p_pipelineLayout, nullptr);
-    vkDestroyRenderPass(p_device, p_renderPass, nullptr);
-
-    for (auto imageView : p_swapChainImageViews)
-    {
-        vkDestroyImageView(p_device, imageView, nullptr);
-    }
-
-    vkDestroySwapchainKHR(p_device, p_swapChain, nullptr);
     vkDestroyDevice(p_device, nullptr);
 
     if ( p_enableValidationLayers )
@@ -326,10 +348,7 @@ void HelloTriangleApp::Cleanup()
     vkDestroySurfaceKHR(p_vulkanInstance, p_surface, nullptr);
     vkDestroyInstance(p_vulkanInstance, nullptr);
 
-    if ( p_window )
-    {
-        glfwDestroyWindow(p_window);
-    }
+    glfwDestroyWindow(p_window);
 
     glfwTerminate();
 }
@@ -698,6 +717,28 @@ void HelloTriangleApp::CreateLogicalDevice()
 
 // -----------------------------------------------------------------------------
 // -----------------------------------------------------------------------------
+void HelloTriangleApp::RecreateSwapChain()
+{
+    int width = 0;
+    int height = 0;
+    glfwGetFramebufferSize(p_window, &width, &height);
+    while (width == 0 || height == 0)
+    {
+        glfwGetFramebufferSize(p_window, &width, &height);
+        glfwWaitEvents();
+    }
+
+    vkDeviceWaitIdle(p_device);
+
+    CleanupSwapChain();
+
+    CreateSwapChain();
+    CreateImageViews();
+    CreateFrameBuffers();
+}
+
+// -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 void HelloTriangleApp::CreateSwapChain()
 {
     SwapChainSupportDetails swapChainSupport = QuerySwapChainSupport(p_physicalDevice);
@@ -759,6 +800,23 @@ void HelloTriangleApp::CreateSwapChain()
 
     p_swapChainImageFormat = surfaceFormat.format;
     p_swapChainExtent = extent;
+}
+
+// -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+void HelloTriangleApp::CleanupSwapChain()
+{
+    for (size_t i = 0; i < p_swapChainFrameBuffers.size(); ++i )
+    {
+        vkDestroyFramebuffer(p_device, p_swapChainFrameBuffers[i], nullptr);
+    }
+
+    for (size_t i = 0; i < p_swapChainImageViews.size(); ++i )
+    {
+        vkDestroyImageView(p_device, p_swapChainImageViews[i], nullptr);
+    }
+
+    vkDestroySwapchainKHR(p_device, p_swapChain, nullptr);
 }
 
 // -----------------------------------------------------------------------------
@@ -1199,3 +1257,12 @@ int main(int argc, const char *argv[])
 
     return EXIT_SUCCESS;
 }
+
+// -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+static void FrameBufferResizeCallback( GLFWwindow *window, int width, int height )
+{
+    auto app = reinterpret_cast<HelloTriangleApp*>(glfwGetWindowUserPointer(window));
+    app->p_frameBufferResized = true;
+}
+
